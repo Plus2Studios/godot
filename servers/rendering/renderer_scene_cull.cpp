@@ -2145,7 +2145,7 @@ void RendererSceneCull::_update_instance_lightmap_captures(Instance *p_instance)
 
 void RendererSceneCull::_light_instance_setup_directional_shadow(int p_shadow_index, Instance *p_instance, const Transform3D p_cam_transform, const Projection &p_cam_projection, bool p_cam_orthogonal, bool p_cam_vaspect) {
 	// For later tight culling, the light culler needs to know the details of the directional light.
-	light_culler->prepare_directional_light(p_instance, p_shadow_index);
+	light_culler->prepare_directional_light_begin(p_instance, p_shadow_index);
 
 	InstanceLightData *light = static_cast<InstanceLightData *>(p_instance->base_data);
 
@@ -2252,6 +2252,8 @@ void RendererSceneCull::_light_instance_setup_directional_shadow(int p_shadow_in
 		receiver_frustum_planes.write[Projection::PLANE_RIGHT] = full_side_planes[Projection::PLANE_RIGHT];
 		receiver_frustum_planes.write[Projection::PLANE_TOP] = full_side_planes[Projection::PLANE_TOP];
 		receiver_frustum_planes.write[Projection::PLANE_BOTTOM] = full_side_planes[Projection::PLANE_BOTTOM];
+
+		light_culler->prepare_directional_light_cascade(p_shadow_index, i, receiver_frustum_planes, endpoints);
 
 		// obtain the light frustum ranges (given endpoints)
 
