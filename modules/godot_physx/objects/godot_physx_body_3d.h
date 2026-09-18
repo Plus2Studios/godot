@@ -89,6 +89,14 @@ private:
 	real_t friction = 1.0;
 	real_t linear_damp = 0.0;
 	real_t angular_damp = 0.0;
+	// RigidBody3D only ever sends this (via BODY_PARAM_CENTER_OF_MASS) when
+	// center_of_mass_mode is CUSTOM -- there's no separate "mode" param, so a
+	// value having been sent at all IS the "custom" signal. _build_actor()
+	// destroys and recreates px_actor on almost any shape/mode change, which
+	// would otherwise silently drop this back to the shape-auto-computed
+	// pose every time -- reapplied there too, not just in set_param().
+	bool has_custom_center_of_mass = false;
+	Vector3 center_of_mass;
 	uint32_t collision_layer = 1;
 	uint32_t collision_mask = 1;
 	uint32_t axis_lock = 0; // PhysicsServer3D::BodyAxis bitmask
@@ -119,10 +127,23 @@ private:
 
 	HashSet<GodotPhysXJoint3D *> joints;
 
-	// PhysX's default 4 position / 1 velocity iterations are marginal for joint
-	// chains; bodies that participate in a joint get a modest bump so pendulums,
-	// ragdolls and cloth strips stay taut. TGS (set on the scene) does most of
-	// the work, this trims the residual stretch.
+	// PhysX's own default of 4 position / 1 velocity iterations is marginal
+	// for any body under a strong, rapidly-varying constraint load -- joint
+	// chains (pendulums, ragdolls, cloth strips) are the case this was added
+	// for. Tried applying this bump universally (to every dynamic body, not
+	// just jointed ones) while root-causing a VehicleBody3D rollover -- it
+	// helped there, but cost a real, measured regression on CUDA/GPU dynamics
+	// for scenes with a large simultaneously-active body count and no joints
+	// at all (snow.tscn's chunk pile, ~250 free rigid actors): the GPU solver
+	// processes a partitioned island's iterations together, so bumping every
+	// body in a big island multiplies the GPU kernel's per-substep work
+	// directly, not just the cost of the individual bumped bodies (unlike the
+	// ~7% CPU-only cost measured on physx_playground's 2000-box pile, which
+	// has no comparably large single GPU-solved island). The vehicle's actual
+	// fix turned out to be apply_impulse's frame-convention bug (see its
+	// comment), not this iteration bump -- so back to jointed-only, which is
+	// what pendulums/ragdolls/cloth actually need and doesn't touch every
+	// free body in a GPU scene.
 	static constexpr uint32_t SOLVER_ITERS_DEFAULT_POS = 4;
 	static constexpr uint32_t SOLVER_ITERS_DEFAULT_VEL = 1;
 	static constexpr uint32_t SOLVER_ITERS_JOINTED_POS = 8;

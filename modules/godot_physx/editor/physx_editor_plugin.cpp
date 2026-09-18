@@ -34,11 +34,24 @@
 #include "../nodes/physx_gas_3d.h"
 #include "../nodes/physx_gas_emitter_3d.h"
 #include "../nodes/physx_particle_fluid_3d.h"
+#include "../vehicle/physx_vehicle_wheel_3d.h"
+#ifdef GODOT_PHYSX_BLAST
+#include "../blast/physx_destructible_3d.h"
+#include "physx_blast_asset_inspector_plugin.h"
+#include "physx_blast_context_menu_plugin.h"
+#include "physx_blast_fracture_dialog.h"
+#include "physx_blast_icons.h"
+#endif
 
 #include "editor/editor_undo_redo_manager.h"
 #include "editor/scene/3d/node_3d_editor_plugin.h"
 #include "editor/settings/editor_settings.h"
 #include "scene/3d/physics/area_3d.h"
+#ifdef GODOT_PHYSX_BLAST
+#include "editor/editor_node.h"
+#include "editor/editor_string_names.h"
+#include "editor/inspector/editor_context_menu_plugin.h"
+#endif
 
 PhysXParticleFluid3DGizmoPlugin::PhysXParticleFluid3DGizmoPlugin() {
 	helper.instantiate();
@@ -454,6 +467,124 @@ void PhysXGasEmitter3DGizmoPlugin::redraw(EditorNode3DGizmo *p_gizmo) {
 	_add_velocity_arrow(p_gizmo, emitter->get_velocity(), get_material("velocity", p_gizmo));
 }
 
+// A wireframe ring in the Y-Z plane, offset by p_center_y along local Y --
+// the wheel's axle runs along local X (wheels sit at +-X offsets from the
+// vehicle centerline), so its actual disc/tire silhouette lies in Y-Z, not
+// flat on the ground like a footprint -- matching how a real wheel mesh
+// (a cylinder with its flat faces perpendicular to the axle) looks.
+static void _add_wheel_disc_wireframe(EditorNode3DGizmo *p_gizmo, float p_radius, float p_center_y, const Ref<Material> &p_material) {
+	const int segs = 24;
+	Vector<Vector3> lines;
+	for (int i = 0; i < segs; i++) {
+		const float a0 = Math::TAU * i / segs;
+		const float a1 = Math::TAU * (i + 1) / segs;
+		lines.push_back(Vector3(0.0f, p_center_y + Math::sin(a0) * p_radius, Math::cos(a0) * p_radius));
+		lines.push_back(Vector3(0.0f, p_center_y + Math::sin(a1) * p_radius, Math::cos(a1) * p_radius));
+	}
+	p_gizmo->add_lines(lines, p_material);
+}
+
+PhysXVehicleWheel3DGizmoPlugin::PhysXVehicleWheel3DGizmoPlugin() {
+	// Green: the wheel's own silhouette (radius) at its configured resting
+	// position -- position now means the same thing VehicleWheel3D's own
+	// position means (where the wheel sits at rest), so this is exact, not
+	// an estimate that can drift from what Play shows.
+	create_material("rest_estimate", Color(0.3, 1.0, 0.4));
+}
+
+bool PhysXVehicleWheel3DGizmoPlugin::has_gizmo(Node3D *p_spatial) {
+	return Object::cast_to<PhysXVehicleWheel3D>(p_spatial) != nullptr;
+}
+
+String PhysXVehicleWheel3DGizmoPlugin::get_gizmo_name() const {
+	return "PhysXVehicleWheel3D";
+}
+
+int PhysXVehicleWheel3DGizmoPlugin::get_priority() const {
+	return -1;
+}
+
+bool PhysXVehicleWheel3DGizmoPlugin::is_selectable_when_hidden() const {
+	return true;
+}
+
+void PhysXVehicleWheel3DGizmoPlugin::redraw(EditorNode3DGizmo *p_gizmo) {
+	PhysXVehicleWheel3D *wheel = Object::cast_to<PhysXVehicleWheel3D>(p_gizmo->get_node_3d());
+	p_gizmo->clear();
+
+	const float radius = wheel->get_radius();
+
+	// The wheel node's own origin now IS the resting position
+	// (configure_vehicle4w() backs out the SDK's max-compression attachment
+	// from this same estimate, so what Play shows matches this exactly,
+	// not just approximately) -- no separate travel-range line needed
+	// since there's no editor/runtime mismatch left to explain.
+	_add_wheel_disc_wireframe(p_gizmo, radius, 0.0f, get_material("rest_estimate", p_gizmo));
+
+	// Forward arrow, drawn from the ground contact point (bottom of the
+	// tire, y=-radius -- where rolling direction actually matters), pointing
+	// toward the car's nose (+Z -- front wheels sit at a larger local Z
+	// than rear wheels in this module's own convention, e.g. the demo's
+	// WheelFL/FR at z=1.35 vs WheelRL/RR at z=-1.35).
+	Vector<Vector3> fwd_arrow;
+	const float len = radius * 1.5f;
+	const float contact_y = -radius;
+	fwd_arrow.push_back(Vector3(0, contact_y, 0));
+	fwd_arrow.push_back(Vector3(0, contact_y, len));
+	fwd_arrow.push_back(Vector3(0, contact_y, len));
+	fwd_arrow.push_back(Vector3(0.08f * radius, contact_y, len * 0.8f));
+	fwd_arrow.push_back(Vector3(0, contact_y, len));
+	fwd_arrow.push_back(Vector3(-0.08f * radius, contact_y, len * 0.8f));
+	p_gizmo->add_lines(fwd_arrow, get_material("rest_estimate", p_gizmo));
+}
+
+#ifdef GODOT_PHYSX_BLAST
+bool PhysXDestructible3DGizmoPlugin::has_gizmo(Node3D *p_spatial) {
+	return Object::cast_to<PhysXDestructible3D>(p_spatial) != nullptr;
+}
+
+String PhysXDestructible3DGizmoPlugin::get_gizmo_name() const {
+	return "PhysXDestructible3D";
+}
+
+int PhysXDestructible3DGizmoPlugin::get_priority() const {
+	return -1;
+}
+
+bool PhysXDestructible3DGizmoPlugin::is_selectable_when_hidden() const {
+	return true;
+}
+
+void PhysXDestructible3DGizmoPlugin::redraw(EditorNode3DGizmo *p_gizmo) {
+	PhysXDestructible3D *destructible = Object::cast_to<PhysXDestructible3D>(p_gizmo->get_node_3d());
+	p_gizmo->clear();
+	const Ref<TriangleMesh> tm = destructible->generate_triangle_mesh();
+	if (tm.is_valid()) {
+		p_gizmo->add_collision_triangles(tm);
+	}
+	// Manual selection-box outline -- see this class's own header comment on
+	// why (not a VisualInstance3D, so the editor won't draw this on its own).
+	// is_selected() gate matches the real dashed selection box's own
+	// behavior (only visible while the node is actually selected) -- without
+	// it this drew unconditionally on every instance, all the time.
+	const AABB aabb = destructible->get_aabb();
+	if (p_gizmo->is_selected() && aabb.size != Vector3()) {
+		Vector<Vector3> lines;
+		for (int i = 0; i < 12; i++) {
+			Vector3 a, b;
+			aabb.get_edge(i, a, b);
+			lines.push_back(a);
+			lines.push_back(b);
+		}
+		p_gizmo->add_lines(lines, get_material("selection_box", p_gizmo));
+	}
+}
+
+PhysXDestructible3DGizmoPlugin::PhysXDestructible3DGizmoPlugin() {
+	create_material("selection_box", Color(1.0, 0.8, 0.2));
+}
+#endif
+
 PhysXEditorPlugin::PhysXEditorPlugin() {
 	Ref<PhysXParticleFluid3DGizmoPlugin> fluid_gizmo;
 	fluid_gizmo.instantiate();
@@ -470,4 +601,35 @@ PhysXEditorPlugin::PhysXEditorPlugin() {
 	Ref<PhysXGasEmitter3DGizmoPlugin> gas_emitter_gizmo;
 	gas_emitter_gizmo.instantiate();
 	Node3DEditor::get_singleton()->add_gizmo_plugin(gas_emitter_gizmo);
+
+	Ref<PhysXVehicleWheel3DGizmoPlugin> vehicle_wheel_gizmo;
+	vehicle_wheel_gizmo.instantiate();
+	Node3DEditor::get_singleton()->add_gizmo_plugin(vehicle_wheel_gizmo);
+
+#ifdef GODOT_PHYSX_BLAST
+	Ref<PhysXDestructible3DGizmoPlugin> destructible_gizmo;
+	destructible_gizmo.instantiate();
+	Node3DEditor::get_singleton()->add_gizmo_plugin(destructible_gizmo);
+
+	blast_fracture_dialog = memnew(PhysXBlastFractureDialog);
+	EditorNode::get_singleton()->get_gui_base()->add_child(blast_fracture_dialog);
+
+	Ref<PhysXBlastFractureMenuPlugin> blast_scene_tree_menu = Ref<PhysXBlastFractureMenuPlugin>(memnew(PhysXBlastFractureMenuPlugin(EditorContextMenuPlugin::CONTEXT_SLOT_SCENE_TREE, blast_fracture_dialog)));
+	EditorContextMenuPluginManager::get_singleton()->add_plugin(EditorContextMenuPlugin::CONTEXT_SLOT_SCENE_TREE, blast_scene_tree_menu);
+
+	Ref<PhysXBlastFractureMenuPlugin> blast_filesystem_menu = Ref<PhysXBlastFractureMenuPlugin>(memnew(PhysXBlastFractureMenuPlugin(EditorContextMenuPlugin::CONTEXT_SLOT_FILESYSTEM, blast_fracture_dialog)));
+	EditorContextMenuPluginManager::get_singleton()->add_plugin(EditorContextMenuPlugin::CONTEXT_SLOT_FILESYSTEM, blast_filesystem_menu);
+
+	Ref<EditorInspectorPluginPhysXBlastAsset> blast_asset_inspector;
+	blast_asset_inspector.instantiate();
+	add_inspector_plugin(blast_asset_inspector);
+
+	// Otherwise PhysXBlastAsset falls back to the engine's generic
+	// Resource/"blank paper" icon everywhere (FileSystem dock, Inspector
+	// header) since nothing in the editor theme matches its class name.
+	Ref<Texture2D> blast_asset_icon = physx_blast_asset_make_icon();
+	if (blast_asset_icon.is_valid()) {
+		EditorNode::get_singleton()->get_editor_theme()->set_icon("PhysXBlastAsset", EditorStringName(EditorIcons), blast_asset_icon);
+	}
+#endif
 }

@@ -113,8 +113,58 @@ public:
 	PhysXGasEmitter3DGizmoPlugin();
 };
 
+// Viewport gizmo for PhysXVehicleWheel3D: a line for the full suspension
+// travel range (node origin = max compression, down to full droop) plus a
+// wireframe ring showing where the wheel will actually settle at rest --
+// computed from the parent PhysXVehicle3D's mass and this wheel's own
+// suspension_stiffness, the same sprung-mass-per-wheel assumption
+// configure_vehicle4w() itself uses. Lets a scene author judge ride height/
+// ground clearance directly in the editor instead of only finding out once
+// the suspension settles in Play.
+class PhysXVehicleWheel3DGizmoPlugin : public EditorNode3DGizmoPlugin {
+	GDCLASS(PhysXVehicleWheel3DGizmoPlugin, EditorNode3DGizmoPlugin);
+
+public:
+	bool has_gizmo(Node3D *p_spatial) override;
+	String get_gizmo_name() const override;
+	int get_priority() const override;
+	bool is_selectable_when_hidden() const override;
+	void redraw(EditorNode3DGizmo *p_gizmo) override;
+
+	PhysXVehicleWheel3DGizmoPlugin();
+};
+
+#ifdef GODOT_PHYSX_BLAST
+class PhysXBlastFractureDialog;
+
+// Viewport gizmo for PhysXDestructible3D -- registers real per-triangle
+// collision geometry (PhysXDestructible3D::generate_triangle_mesh(), same
+// mechanism MeshInstance3DGizmoPlugin uses) so it can be clicked directly in
+// the viewport like a real mesh, not just via the Scene dock. Also draws the
+// selection-box outline itself (PhysXDestructible3D::get_aabb()) -- normally
+// a VisualInstance3D gets this automatically from the editor, but this class
+// deliberately isn't one (see its own class doc comment on why), so the
+// gizmo has to do it manually here instead.
+class PhysXDestructible3DGizmoPlugin : public EditorNode3DGizmoPlugin {
+	GDCLASS(PhysXDestructible3DGizmoPlugin, EditorNode3DGizmoPlugin);
+
+public:
+	bool has_gizmo(Node3D *p_spatial) override;
+	String get_gizmo_name() const override;
+	int get_priority() const override;
+	bool is_selectable_when_hidden() const override;
+	void redraw(EditorNode3DGizmo *p_gizmo) override;
+
+	PhysXDestructible3DGizmoPlugin();
+};
+#endif
+
 class PhysXEditorPlugin : public EditorPlugin {
 	GDCLASS(PhysXEditorPlugin, EditorPlugin);
+
+#ifdef GODOT_PHYSX_BLAST
+	PhysXBlastFractureDialog *blast_fracture_dialog = nullptr;
+#endif
 
 public:
 	PhysXEditorPlugin();
