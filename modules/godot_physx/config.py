@@ -43,6 +43,8 @@ def get_doc_classes():
         "PhysXBlastAsset",
         "PhysXVehicle3D",
         "PhysXVehicleWheel3D",
+        "PhysXMotorcycle3D",
+        "PhysXTank3D",
     ]
 
 

@@ -30,6 +30,7 @@
 #include "physx_vehicle_3d.h"
 
 #include "../godot_physx_conversions.h"
+#include "../godot_physx_project_settings.h"
 #include "../godot_physx_server_3d.h"
 #include "../spaces/godot_physx_space_3d.h"
 #include "godot_physx_vehicle4w.h"
@@ -45,6 +46,8 @@ struct PhysXVehicle3D::Impl {
 	Vehicle4W vehicle;
 	PxVehiclePhysXSimulationContext simulationContext;
 	PxScene *scene = nullptr;
+	PxReal sleep_threshold = 0.0f;
+	PxReal time_before_sleep = 0.0f;
 	bool built = false;
 	// wheel_order[Vehicle4W::WHEEL_FL/FR/RL/RR] = index into the parent's own
 	// `wheels` vector (child-registration order) for that canonical slot --
@@ -130,6 +133,8 @@ bool PhysXVehicle3D::_build() {
 	cfg.max_brake_torque = max_brake_torque;
 	cfg.max_steer_angle = max_steer_angle;
 	cfg.ackermann_strength = ackermann_strength;
+	cfg.front_anti_roll_stiffness = front_anti_roll_stiffness;
+	cfg.rear_anti_roll_stiffness = rear_anti_roll_stiffness;
 	cfg.collision_layer = collision_layer;
 	cfg.collision_mask = collision_mask;
 
@@ -137,6 +142,7 @@ bool PhysXVehicle3D::_build() {
 		PhysXVehicleWheel3D *w = wheels[i];
 		Vehicle4WWheelConfig &wc = cfg.wheels[i];
 		wc.position = w->get_position();
+		wc.basis = w->get_transform().basis;
 		wc.radius = w->get_radius();
 		wc.half_width = w->get_half_width();
 		wc.wheel_mass = w->get_wheel_mass();
@@ -147,6 +153,7 @@ bool PhysXVehicle3D::_build() {
 		wc.suspension_damping = w->get_suspension_damping();
 		wc.tire_lateral_stiffness = w->get_tire_lateral_stiffness();
 		wc.tire_longitudinal_stiffness = w->get_tire_longitudinal_stiffness();
+		wc.tire_camber_stiffness = w->get_tire_camber_stiffness();
 		wc.tire_friction = w->get_tire_friction();
 		wc.tire_rest_grip = w->get_tire_rest_grip();
 		wc.tire_slide_grip = w->get_tire_slide_grip();
@@ -160,6 +167,12 @@ bool PhysXVehicle3D::_build() {
 
 	Vehicle4W &v = impl->vehicle;
 	v.physxActor.rigidBody->setGlobalPose(to_px(get_global_transform()));
+	impl->sleep_threshold = (PxReal)space->get_sleep_energy_threshold();
+	impl->time_before_sleep = (PxReal)space->get_time_before_sleep();
+	PxRigidDynamic *dynamic_body = v.physxActor.rigidBody->is<PxRigidDynamic>();
+	ERR_FAIL_NULL_V(dynamic_body, false);
+	dynamic_body->setSleepThreshold(can_sleep && GodotPhysXProjectSettings::allow_sleep ? impl->sleep_threshold : 0.0f);
+	dynamic_body->setWakeCounter(impl->time_before_sleep);
 	scene->addActor(*v.physxActor.rigidBody);
 	v.physxActor.rigidBody->setName("PhysXVehicle3D");
 
@@ -269,7 +282,14 @@ real_t PhysXVehicle3D::get_forward_speed() const {
 	if (!impl->built) {
 		return 0.0;
 	}
-	const PxVec3 fwd = impl->vehicle.frame.getLngAxis();
+	// frame.getLngAxis() is a fixed LOCAL-frame constant (e.g. (0,0,-1)),
+	// not a world-space direction -- rotate it into world space by the
+	// actor's current orientation before dotting against the world-space
+	// velocity, or this is only correct when yaw matches spawn orientation
+	// (found via a real bug report: correct at first, sign-flips as the
+	// vehicle yaws further away from its start heading).
+	const PxTransform actor_pose = impl->vehicle.physxActor.rigidBody->getGlobalPose();
+	const PxVec3 fwd = actor_pose.q.rotate(impl->vehicle.frame.getLngAxis());
 	return (real_t)impl->vehicle.rigidBodyState.linearVelocity.dot(fwd);
 }
 
@@ -369,10 +389,32 @@ void PhysXVehicle3D::set_center_of_mass(const Vector3 &p_center_of_mass) {
 	center_of_mass = p_center_of_mass;
 	_rebuild_if_live();
 }
+void PhysXVehicle3D::set_can_sleep(bool p_can_sleep) {
+	if (can_sleep == p_can_sleep) {
+		return;
+	}
+	can_sleep = p_can_sleep;
+	if (impl->built) {
+		PxRigidDynamic *body = impl->vehicle.physxActor.rigidBody->is<PxRigidDynamic>();
+		ERR_FAIL_NULL(body);
+		body->setSleepThreshold(can_sleep && GodotPhysXProjectSettings::allow_sleep ? impl->sleep_threshold : 0.0f);
+		body->setWakeCounter(impl->time_before_sleep);
+		if (!can_sleep) {
+			body->wakeUp();
+		}
+	}
+}
+
+bool PhysXVehicle3D::is_sleeping() const {
+	PxRigidDynamic *body = impl->built ? impl->vehicle.physxActor.rigidBody->is<PxRigidDynamic>() : nullptr;
+	return body && body->isSleeping();
+}
 PHYSX_VEHICLE_SETTER(max_engine_torque, max_engine_torque)
 PHYSX_VEHICLE_SETTER(max_brake_torque, max_brake_torque)
 PHYSX_VEHICLE_SETTER(max_steer_angle, max_steer_angle)
 PHYSX_VEHICLE_SETTER(ackermann_strength, ackermann_strength)
+PHYSX_VEHICLE_SETTER(front_anti_roll_stiffness, front_anti_roll_stiffness)
+PHYSX_VEHICLE_SETTER(rear_anti_roll_stiffness, rear_anti_roll_stiffness)
 
 #undef PHYSX_VEHICLE_SETTER
 
@@ -407,6 +449,10 @@ void PhysXVehicle3D::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("get_center_of_mass"), &PhysXVehicle3D::get_center_of_mass);
 	ADD_PROPERTY(PropertyInfo(Variant::INT, "center_of_mass_mode", PROPERTY_HINT_ENUM, "Auto,Custom"), "set_center_of_mass_mode", "get_center_of_mass_mode");
 	ADD_PROPERTY(PropertyInfo(Variant::VECTOR3, "center_of_mass", PROPERTY_HINT_RANGE, "-10,10,0.01,or_less,or_greater,suffix:m"), "set_center_of_mass", "get_center_of_mass");
+	ClassDB::bind_method(D_METHOD("set_can_sleep", "able_to_sleep"), &PhysXVehicle3D::set_can_sleep);
+	ClassDB::bind_method(D_METHOD("is_able_to_sleep"), &PhysXVehicle3D::is_able_to_sleep);
+	ClassDB::bind_method(D_METHOD("is_sleeping"), &PhysXVehicle3D::is_sleeping);
+	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "can_sleep"), "set_can_sleep", "is_able_to_sleep");
 
 	ClassDB::bind_method(D_METHOD("set_max_engine_torque", "value"), &PhysXVehicle3D::set_max_engine_torque);
 	ClassDB::bind_method(D_METHOD("get_max_engine_torque"), &PhysXVehicle3D::get_max_engine_torque);
@@ -416,11 +462,18 @@ void PhysXVehicle3D::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("get_max_steer_angle"), &PhysXVehicle3D::get_max_steer_angle);
 	ClassDB::bind_method(D_METHOD("set_ackermann_strength", "value"), &PhysXVehicle3D::set_ackermann_strength);
 	ClassDB::bind_method(D_METHOD("get_ackermann_strength"), &PhysXVehicle3D::get_ackermann_strength);
+	ClassDB::bind_method(D_METHOD("set_front_anti_roll_stiffness", "value"), &PhysXVehicle3D::set_front_anti_roll_stiffness);
+	ClassDB::bind_method(D_METHOD("get_front_anti_roll_stiffness"), &PhysXVehicle3D::get_front_anti_roll_stiffness);
+	ClassDB::bind_method(D_METHOD("set_rear_anti_roll_stiffness", "value"), &PhysXVehicle3D::set_rear_anti_roll_stiffness);
+	ClassDB::bind_method(D_METHOD("get_rear_anti_roll_stiffness"), &PhysXVehicle3D::get_rear_anti_roll_stiffness);
 	ADD_GROUP("Drivetrain", "");
 	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "max_engine_torque", PROPERTY_HINT_RANGE, "0,5000,10,or_greater"), "set_max_engine_torque", "get_max_engine_torque");
 	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "max_brake_torque", PROPERTY_HINT_RANGE, "0,20000,10,or_greater"), "set_max_brake_torque", "get_max_brake_torque");
 	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "max_steer_angle", PROPERTY_HINT_RANGE, "0,1.5708,0.01"), "set_max_steer_angle", "get_max_steer_angle");
 	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "ackermann_strength", PROPERTY_HINT_RANGE, "0,1,0.01"), "set_ackermann_strength", "get_ackermann_strength");
+	ADD_GROUP("Anti-Roll", "");
+	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "front_anti_roll_stiffness", PROPERTY_HINT_RANGE, "-50000,50000,100,or_less,or_greater"), "set_front_anti_roll_stiffness", "get_front_anti_roll_stiffness");
+	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "rear_anti_roll_stiffness", PROPERTY_HINT_RANGE, "-50000,50000,100,or_less,or_greater"), "set_rear_anti_roll_stiffness", "get_rear_anti_roll_stiffness");
 
 	ClassDB::bind_method(D_METHOD("set_throttle", "value"), &PhysXVehicle3D::set_throttle);
 	ClassDB::bind_method(D_METHOD("get_throttle"), &PhysXVehicle3D::get_throttle);
